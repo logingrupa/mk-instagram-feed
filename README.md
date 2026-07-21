@@ -63,11 +63,25 @@ Or insert the **Instagram Feed** block in the editor.
 
 ## Cache
 
-- Feed: 2h transient (`mk_ig_feed_v3`), last-good copy in the `mk_ig_feed_lastgood` option
+- Feed: 2h transient per requested count (`mk_ig_feed_v3_9`, `mk_ig_feed_v3_30`, …), last-good copy in the `mk_ig_feed_lastgood` option
 - Profile: 24h transient (`mk_ig_profile_v1`)
+- Outage backoff: 5m transient (`mk_ig_error_backoff`) — while the API is failing the last-good copy is served without retrying on every page view
 
 Force a refresh:
 
 ```sh
-wp transient delete mk_ig_feed_v3 && wp transient delete mk_ig_profile_v1
+wp eval 'mk_ig_flush_cache();'
+```
+
+The cache is also flushed automatically whenever the daily job stores a refreshed token.
+
+## A note on WP-Cron
+
+Token refresh runs on the daily `mk_ig_refresh_token_event` WP-Cron hook. On sites
+where WP-Cron is disabled or not firing (no traffic, `DISABLE_WP_CRON`, a broken
+cron option) the token will silently expire after 60 days and the feed will freeze
+on its last-good copy. Drive the hook from system cron instead:
+
+```cron
+17 4 * * * www-data /usr/bin/php /usr/bin/wp --path=/srv/site cron event run mk_ig_refresh_token_event
 ```

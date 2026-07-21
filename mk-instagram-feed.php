@@ -3,7 +3,7 @@
  * Plugin Name: MK Instagram Feed
  * Plugin URI: https://github.com/logingrupa/mk-instagram-feed
  * Description: Server-side cached Instagram feed (Graph API, Instagram Login). Shortcode [mk_instagram]. Zero front-end JS, no third-party scripts.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Logingrupa
  * License: MIT
  */
@@ -18,6 +18,12 @@ const MK_IG_TRANSIENT       = 'mk_ig_feed_v3';
 const MK_IG_PROFILE_TRANSIENT = 'mk_ig_profile_v1';
 const MK_IG_CACHE_TTL       = 2 * HOUR_IN_SECONDS;
 const MK_IG_GRAPH           = 'https://graph.instagram.com';
+const MK_IG_ERROR_TRANSIENT = 'mk_ig_error_backoff';
+const MK_IG_ERROR_TTL       = 5 * MINUTE_IN_SECONDS;
+const MK_IG_MAX_COUNT       = 50;
+/* Insights are fetched one request per video inside the page render, so this
+   timeout is the per-video worst case a visitor can be made to wait. */
+const MK_IG_INSIGHTS_TIMEOUT = 2;
 
 function mk_ig_get_token()
 {
@@ -39,7 +45,7 @@ function mk_ig_fetch_remote($count)
     $url = add_query_arg(
         [
             'fields'       => 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,username,like_count,comments_count',
-            'limit'        => max(1, min(50, (int) $count)),
+            'limit'        => mk_ig_clamp_count($count),
             'access_token' => $token,
         ],
         MK_IG_GRAPH . '/me/media'
@@ -61,22 +67,59 @@ function mk_ig_fetch_remote($count)
     return $body['data'];
 }
 
+function mk_ig_clamp_count($count)
+{
+    return max(1, min(MK_IG_MAX_COUNT, (int) $count));
+}
+
+/**
+ * Cache key is per requested count: a [mk_instagram count="30"] block must not
+ * be served a nine-item payload cached earlier by a count="9" block.
+ */
+function mk_ig_transient_key($count)
+{
+    return MK_IG_TRANSIENT . '_' . mk_ig_clamp_count($count);
+}
+
 function mk_ig_get_media($count)
 {
-    $cached = get_transient(MK_IG_TRANSIENT);
+    $count = mk_ig_clamp_count($count);
+    $key   = mk_ig_transient_key($count);
+
+    $cached = get_transient($key);
     if (is_array($cached)) {
         return $cached;
     }
 
+    // While the API is failing, serve the last good copy without retrying on
+    // every single page view.
+    if (get_transient(MK_IG_ERROR_TRANSIENT)) {
+        return get_option(MK_IG_LASTGOOD_OPTION, []);
+    }
+
     $fresh = mk_ig_fetch_remote($count);
     if (is_wp_error($fresh)) {
+        set_transient(MK_IG_ERROR_TRANSIENT, 1, MK_IG_ERROR_TTL);
         return get_option(MK_IG_LASTGOOD_OPTION, []);
     }
 
     $fresh = mk_ig_attach_views($fresh, mk_ig_get_token());
-    set_transient(MK_IG_TRANSIENT, $fresh, MK_IG_CACHE_TTL);
+    set_transient($key, $fresh, MK_IG_CACHE_TTL);
     update_option(MK_IG_LASTGOOD_OPTION, $fresh, false);
     return $fresh;
+}
+
+/**
+ * Drop every cached payload. Handy after changing the token:
+ *   wp eval 'mk_ig_flush_cache();'
+ */
+function mk_ig_flush_cache()
+{
+    for ($i = 1; $i <= MK_IG_MAX_COUNT; $i++) {
+        delete_transient(mk_ig_transient_key($i));
+    }
+    delete_transient(MK_IG_PROFILE_TRANSIENT);
+    delete_transient(MK_IG_ERROR_TRANSIENT);
 }
 
 function mk_ig_attach_views($items, $token)
@@ -89,7 +132,7 @@ function mk_ig_attach_views($items, $token)
             ['metric' => 'views', 'access_token' => $token],
             MK_IG_GRAPH . '/' . rawurlencode($item['id']) . '/insights'
         );
-        $response = wp_remote_get($url, ['timeout' => 6]);
+        $response = wp_remote_get($url, ['timeout' => MK_IG_INSIGHTS_TIMEOUT]);
         if (is_wp_error($response)) {
             continue;
         }
@@ -150,7 +193,7 @@ function mk_ig_get_profile()
 function mk_ig_render($atts)
 {
     $atts  = shortcode_atts(['count' => 9, 'columns' => 3], $atts, 'mk_instagram');
-    $count = max(1, min(50, (int) $atts['count']));
+    $count = mk_ig_clamp_count($atts['count']);
     $cols  = max(1, min(6, (int) $atts['columns']));
     $items = array_slice((array) mk_ig_get_media($count), 0, $count);
 
@@ -362,6 +405,7 @@ function mk_ig_refresh_token()
     }
 
     update_option(MK_IG_TOKEN_OPTION, $body['access_token'], false);
+    mk_ig_flush_cache();
 }
 add_action('mk_ig_refresh_token_event', 'mk_ig_refresh_token');
 
