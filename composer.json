@@ -1,0 +1,11 @@
+{
+  "name": "logingrupa/mk-instagram-feed",
+  "description": "Server-side cached Instagram feed (Graph API, Instagram Login). Shortcode [mk_instagram] + Gutenberg block. Zero third-party scripts.",
+  "type": "wordpress-muplugin",
+  "license": "MIT",
+  "keywords": ["wordpress", "instagram", "feed", "gutenberg"],
+  "require": {
+    "php": ">=8.1",
+    "composer/installers": "^2.2"
+  }
+}
